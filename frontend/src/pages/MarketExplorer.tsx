@@ -4,7 +4,8 @@ import { Download, RefreshCw } from 'lucide-react'
 import { CandlestickChart } from '../components/charts/CandlestickChart'
 import { Alert, Button, Input, Label, Panel, Select } from '../components/ui/primitives'
 import { useApp } from '../context/AppContext'
-import { daysAgo, formatINR, formatPct, isoDate } from '../lib/format'
+import { DEMO_CONFIG } from '../lib/demoConfig'
+import { daysAgo, formatINR, formatPct } from '../lib/format'
 import { api } from '../services/api'
 import type { MarketDataResponse } from '../types'
 
@@ -18,8 +19,9 @@ const presets = [
 export function MarketExplorer() {
   const { instruments, selectedSymbol, setSelectedSymbol } = useApp()
   const navigate = useNavigate()
-  const [start, setStart] = useState(daysAgo(365))
-  const [end, setEnd] = useState(isoDate(new Date()))
+  const [start, setStart] = useState<string>(DEMO_CONFIG.startDate)
+  const [end, setEnd] = useState<string>(DEMO_CONFIG.endDate)
+  const [cacheOnly, setCacheOnly] = useState(true)
   const [data, setData] = useState<MarketDataResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -50,6 +52,14 @@ export function MarketExplorer() {
     return out
   }, [data, showSma, showEma, showRsi])
 
+  const loadDemoConfiguration = () => {
+    setSelectedSymbol(DEMO_CONFIG.symbol)
+    setStart(DEMO_CONFIG.startDate)
+    setEnd(DEMO_CONFIG.endDate)
+    setCacheOnly(true)
+    setError(null)
+  }
+
   const fetchData = async (refresh = false) => {
     setLoading(true)
     setError(null)
@@ -59,6 +69,7 @@ export function MarketExplorer() {
         start_date: start,
         end_date: end,
         refresh,
+        cache_only: !refresh && cacheOnly,
         sma: [20, 50],
         ema: [20, 50],
         rsi_period: 14,
@@ -142,21 +153,37 @@ export function MarketExplorer() {
                   className="px-2"
                   onClick={() => {
                     setStart(daysAgo(p.days))
-                    setEnd(isoDate(new Date()))
+                    setEnd(DEMO_CONFIG.endDate)
                   }}
                 >
                   {p.label}
                 </Button>
               ))}
             </div>
+            <Button variant="secondary" onClick={loadDemoConfiguration} disabled={loading}>
+              Load Demo Configuration
+            </Button>
             <Button onClick={() => void fetchData(false)} disabled={loading}>
               {loading ? 'Loading…' : 'Fetch data'}
             </Button>
-            <Button variant="secondary" onClick={() => void fetchData(true)} disabled={loading}>
+            <Button
+              variant="secondary"
+              onClick={() => void fetchData(true)}
+              disabled={loading || cacheOnly}
+              title={cacheOnly ? 'Disable cache-only to refresh from the provider' : undefined}
+            >
               <RefreshCw size={14} /> Refresh
             </Button>
           </div>
         </div>
+        <label className="mt-3 flex items-center gap-2 text-xs text-oq-secondary">
+          <input
+            type="checkbox"
+            checked={cacheOnly}
+            onChange={(e) => setCacheOnly(e.target.checked)}
+          />
+          Cache only (evaluation / offline — no Yahoo request)
+        </label>
       </Panel>
 
       {error && <Alert tone="error">{error}</Alert>}

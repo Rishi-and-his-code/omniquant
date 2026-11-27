@@ -1,0 +1,37 @@
+{
+  "title": "Primary demonstration \u2014 EMA 20/50",
+  "backtest_id": 7,
+  "strategy": "AI Generated \u2014 EMA 20/50 Demo",
+  "symbol": "RELIANCE.NS",
+  "start_date": "2023-01-01",
+  "end_date": "2025-12-31",
+  "initial_capital": 100000.0,
+  "allocation_percent": 100.0,
+  "transaction_cost_percent": 0.1,
+  "slippage_percent": 0.05,
+  "metrics": {
+    "initial_capital": 100000.0,
+    "final_equity": 115972.00960214145,
+    "net_profit_loss": 15972.00960214145,
+    "total_return_percent": 15.972009602141446,
+    "max_drawdown_percent": 21.933227406440313,
+    "completed_trades": 7,
+    "win_rate_percent": 42.857142857142854,
+    "profit_factor": 1.5021373478437847,
+    "sharpe_ratio": 0.42750614726767633,
+    "buy_and_hold_return_percent": 34.634345037446536,
+    "notes": []
+  },
+  "open_position": {
+    "entry_signal_date": "2025-10-21",
+    "entry_date": "2025-10-23",
+    "quantity": 68,
+    "entry_price": 1468.9456682770074,
+    "mark_price": 1563.172607421875,
+    "market_value": 106295.7373046875,
+    "unrealized_pnl": 6307.543556408171,
+    "note": "Marked to final close; hypothetical future exit fees are not deducted."
+  },
+  "cache_status": "cached",
+  "completed_trades_count": 7
+}

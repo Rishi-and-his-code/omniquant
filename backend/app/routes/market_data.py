@@ -27,6 +27,10 @@ def get_market_data(
     start_date: date = Query(...),
     end_date: date = Query(...),
     refresh: bool = Query(False),
+    cache_only: bool = Query(
+        False,
+        description="Serve only validated local cache; do not contact the market-data provider.",
+    ),
     sma: list[int] | None = Query(None),
     ema: list[int] | None = Query(None),
     rsi_period: int | None = Query(None, ge=2, le=250),
@@ -58,6 +62,16 @@ def get_market_data(
     if rsi_period:
         warmup = max(warmup, rsi_period + 5)
 
+    if refresh and cache_only:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_CACHE_MODE",
+                "message": "refresh and cache_only cannot both be true.",
+                "details": None,
+            },
+        )
+
     svc = MarketDataService()
     try:
         result = svc.get_history(
@@ -65,11 +79,15 @@ def get_market_data(
             start_date,
             end_date,
             refresh=refresh,
+            allow_network=not cache_only,
             warmup_days=warmup,
         )
     except MarketDataError as exc:
+        status = 502 if exc.code == "MARKET_DATA_UNAVAILABLE" else 400
+        if exc.code == "MARKET_DATA_CACHE_ONLY":
+            status = 404
         raise HTTPException(
-            status_code=502 if exc.code == "MARKET_DATA_UNAVAILABLE" else 400,
+            status_code=status,
             detail={"code": exc.code, "message": exc.message, "details": exc.details},
         ) from exc
 

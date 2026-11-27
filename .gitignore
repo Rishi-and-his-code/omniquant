@@ -4,7 +4,6 @@
 .env.*.local
 *.pem
 *.key
-
 # Python
 __pycache__/
 *.py[cod]
@@ -24,7 +23,6 @@ build/
 .coverage
 htmlcov/
 *.cover
-
 # Node / frontend
 node_modules/
 frontend/dist/
@@ -32,7 +30,6 @@ frontend/build/
 *.local
 .npm
 .vite/
-
 # Application data (persist locally, never commit)
 data/omniquant.db
 data/*.db
@@ -43,11 +40,9 @@ data/cache/**
 !data/cache/.gitkeep
 data/artifacts/**
 !data/artifacts/.gitkeep
-
 # Docker
 *.tar
 omniquant-image.tar
-
 # IDE / OS
 .DS_Store
 .idea/
@@ -55,15 +50,13 @@ omniquant-image.tar
 *.swp
 *.swo
 Thumbs.db
-
 # Logs
 *.log
 logs/
-
 # Test / temp
 tmp/
 temp/
 .cache/
-
 backend/data/
 backend/tests/_tmp/
+docs/evaluation-evidence/screenshots/

@@ -184,6 +184,7 @@ class MarketDataService:
         *,
         refresh: bool = False,
         allow_cache_fallback: bool = True,
+        allow_network: bool = True,
         warmup_days: int = 0,
     ) -> MarketDataResult:
         warnings: list[str] = []
@@ -220,6 +221,17 @@ class MarketDataService:
                     "Serving validated local cache (network fetch skipped)."
                 ]
                 return cached
+
+        if not allow_network:
+            raise MarketDataError(
+                "MARKET_DATA_CACHE_ONLY",
+                "No covering local cache is available and network market-data fetch is disabled.",
+                details={
+                    "symbol": symbol,
+                    "start": start_date.isoformat(),
+                    "end": effective_end.isoformat(),
+                },
+            )
 
         try:
             df_raw, fetch_source = self._fetch_provider(symbol, fetch_start, provider_end_exclusive)

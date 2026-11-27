@@ -1,0 +1,19 @@
+{
+  "title": "Secondary demonstration \u2014 EMA 10/30",
+  "backtest_id": 8,
+  "strategy": "OmniQuant \u2014 EMA 10/30 Comparison",
+  "symbol": "RELIANCE.NS",
+  "metrics": {
+    "initial_capital": 100000.0,
+    "final_equity": 116513.87708725654,
+    "net_profit_loss": 16513.877087256536,
+    "total_return_percent": 16.513877087256535,
+    "max_drawdown_percent": 26.752474252905145,
+    "completed_trades": 12,
+    "win_rate_percent": 33.33333333333333,
+    "profit_factor": 1.2255027005241856,
+    "sharpe_ratio": 0.4447342133533049,
+    "buy_and_hold_return_percent": 34.634345037446536,
+    "notes": []
+  }
+}

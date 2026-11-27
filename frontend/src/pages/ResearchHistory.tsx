@@ -15,10 +15,12 @@ export function ResearchHistory() {
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [backtests, setBacktests] = useState<BacktestSummary[]>([])
   const [reports, setReports] = useState<AIReport[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedReport, setSelectedReport] = useState<AIReport | null>(null)
 
   useEffect(() => {
+    setLoading(true)
     void Promise.all([api.strategies(), api.backtests(), api.allReports()])
       .then(([s, b, r]) => {
         setStrategies(s)
@@ -26,6 +28,7 @@ export function ResearchHistory() {
         setReports(r)
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load history'))
+      .finally(() => setLoading(false))
   }, [])
 
   return (
@@ -52,11 +55,14 @@ export function ResearchHistory() {
       </div>
 
       {error && <Alert tone="error">{error}</Alert>}
+      {loading && <Alert tone="info">Loading research history…</Alert>}
 
       {tab === 'strategies' && (
         <Panel title="Strategies">
           <div className="space-y-2">
-            {strategies.length === 0 && <p className="text-sm text-oq-muted">No strategies saved.</p>}
+            {!loading && strategies.length === 0 && (
+              <p className="text-sm text-oq-muted">No strategies saved.</p>
+            )}
             {strategies.map((s) => (
               <div
                 key={s.id}

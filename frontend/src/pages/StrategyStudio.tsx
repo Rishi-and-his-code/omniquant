@@ -53,6 +53,7 @@ export function StrategyStudio() {
   const { setPendingStrategyVersionId, pendingStrategyVersionId, health } = useApp()
   const [mode, setMode] = useState<Mode>('manual')
   const [strategies, setStrategies] = useState<Strategy[]>([])
+  const [strategiesLoading, setStrategiesLoading] = useState(true)
   const [name, setName] = useState('My Strategy')
   const [type, setType] = useState<StratType>('ema_crossover')
   const [params, setParams] = useState(defaultParams('ema_crossover'))
@@ -68,15 +69,28 @@ export function StrategyStudio() {
   const dsl = useMemo(() => buildDsl(name, type, params), [name, type, params])
   const rules = useMemo(() => rulesFor(type, params), [type, params])
 
-  const reload = () => api.strategies().then(setStrategies).catch(() => setStrategies([]))
+  const reload = () =>
+    api
+      .strategies()
+      .then((list) => {
+        setStrategies(list)
+        setStrategiesLoading(false)
+      })
+      .catch(() => {
+        setStrategies([])
+        setStrategiesLoading(false)
+      })
 
   useEffect(() => {
     let cancelled = false
+    setStrategiesLoading(true)
     void api
       .strategies()
       .then((list) => {
-        if (cancelled || consumedPendingId.current) return
+        if (cancelled) return
         setStrategies(list)
+        setStrategiesLoading(false)
+        if (consumedPendingId.current) return
         if (pendingStrategyVersionId == null) return
         consumedPendingId.current = true
         const owner = list.find((s) =>
@@ -94,7 +108,10 @@ export function StrategyStudio() {
         setPendingStrategyVersionId(null)
       })
       .catch(() => {
-        if (!cancelled) setStrategies([])
+        if (!cancelled) {
+          setStrategies([])
+          setStrategiesLoading(false)
+        }
       })
     return () => {
       cancelled = true
@@ -333,7 +350,10 @@ export function StrategyStudio() {
 
             <Panel title="Saved strategies">
               <div className="space-y-2">
-                {strategies.length === 0 && (
+                {strategiesLoading && (
+                  <p className="text-sm text-oq-muted">Loading saved strategies…</p>
+                )}
+                {!strategiesLoading && strategies.length === 0 && (
                   <p className="text-sm text-oq-muted">No saved strategies yet.</p>
                 )}
                 {strategies.map((s) => (

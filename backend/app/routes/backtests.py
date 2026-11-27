@@ -27,6 +27,9 @@ from app.schemas.backtest import (
     CurvePoint,
     OpenPositionOut,
     PerformanceMetrics,
+    SensitivityCell,
+    SensitivityRequest,
+    SensitivityResponse,
     TradeMarker,
     TradeOut,
 )
@@ -173,6 +176,7 @@ def create_backtest(body: BacktestCreateRequest, db: Session = Depends(get_db)) 
             body.start_date,
             body.end_date,
             warmup_days=warmup + 30,
+            allow_network=not body.cache_only,
         )
         engine = BacktestEngine()
         config = BacktestConfig(
@@ -245,8 +249,9 @@ def create_backtest(body: BacktestCreateRequest, db: Session = Depends(get_db)) 
         run.error_message = exc.message
         run.completed_at = datetime.now(timezone.utc)
         db.commit()
+        status = 404 if exc.code == "MARKET_DATA_CACHE_ONLY" else 502
         raise HTTPException(
-            status_code=502,
+            status_code=status,
             detail={"code": exc.code, "message": exc.message, "details": exc.details},
         ) from exc
     except Exception as exc:
@@ -273,6 +278,121 @@ def create_backtest(body: BacktestCreateRequest, db: Session = Depends(get_db)) 
         .where(BacktestRun.id == run.id)
     ).scalar_one()
     return _serialize_result(run)
+
+
+@router.post("/backtests/sensitivity", response_model=SensitivityResponse)
+def run_parameter_sensitivity(
+    body: SensitivityRequest, db: Session = Depends(get_db)
+) -> SensitivityResponse:
+    """In-sample SMA/EMA parameter grid using the existing deterministic engine."""
+    instrument = db.execute(
+        select(Instrument).where(Instrument.symbol == body.symbol)
+    ).scalar_one_or_none()
+    if instrument is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "INSTRUMENT_NOT_FOUND", "message": "Instrument not found", "details": None},
+        )
+    if not instrument.is_tradable:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INSTRUMENT_NOT_TRADABLE",
+                "message": f"{instrument.symbol} cannot be used for sensitivity analysis in this MVP.",
+                "details": None,
+            },
+        )
+
+    max_period = max([*body.fast_periods, *body.slow_periods])
+    # Keep warm-up modest so prepared demo caches (≈Oct 2022+) still cover the request.
+    warmup_days = max_period + 15
+    mds = MarketDataService()
+    try:
+        md = mds.get_history(
+            instrument.symbol,
+            body.start_date,
+            body.end_date,
+            warmup_days=warmup_days,
+            allow_network=not body.cache_only,
+        )
+    except MarketDataError as exc:
+        status = 404 if exc.code == "MARKET_DATA_CACHE_ONLY" else 502
+        raise HTTPException(
+            status_code=status,
+            detail={"code": exc.code, "message": exc.message, "details": exc.details},
+        ) from exc
+
+    engine = BacktestEngine()
+    cells: list[SensitivityCell] = []
+    evaluated = 0
+    for fast in body.fast_periods:
+        for slow in body.slow_periods:
+            if fast >= slow:
+                cells.append(
+                    SensitivityCell(
+                        fast_period=fast,
+                        slow_period=slow,
+                        valid=False,
+                        error="fast_period must be smaller than slow_period",
+                    )
+                )
+                continue
+            dsl = parse_strategy_dsl(
+                {
+                    "schema_version": 1,
+                    "name": f"{body.strategy_type} {fast}/{slow}",
+                    "strategy_type": body.strategy_type,
+                    "parameters": {"fast_period": fast, "slow_period": slow},
+                    "position_type": "long_only",
+                }
+            )
+            config = BacktestConfig(
+                strategy=dsl,
+                start_date=body.start_date,
+                end_date=body.end_date,
+                initial_capital=body.initial_capital,
+                allocation_percent=body.allocation_percent,
+                transaction_cost_percent=body.transaction_cost_percent,
+                slippage_percent=body.slippage_percent,
+            )
+            try:
+                outcome = engine.run(md.df.copy(), config)
+                metrics = outcome.metrics
+                cells.append(
+                    SensitivityCell(
+                        fast_period=fast,
+                        slow_period=slow,
+                        valid=True,
+                        total_return_percent=metrics.get("total_return_percent"),
+                        max_drawdown_percent=metrics.get("max_drawdown_percent"),
+                        sharpe_ratio=metrics.get("sharpe_ratio"),
+                        completed_trades=metrics.get("completed_trades"),
+                        final_equity=metrics.get("final_equity"),
+                    )
+                )
+                evaluated += 1
+            except Exception as exc:
+                cells.append(
+                    SensitivityCell(
+                        fast_period=fast,
+                        slow_period=slow,
+                        valid=True,
+                        error=str(exc),
+                    )
+                )
+
+    return SensitivityResponse(
+        symbol=instrument.symbol,
+        strategy_type=body.strategy_type,
+        start_date=body.start_date.isoformat(),
+        end_date=body.end_date.isoformat(),
+        fast_periods=body.fast_periods,
+        slow_periods=body.slow_periods,
+        cache_status=md.cache_status,
+        data_source=md.source,
+        combinations_evaluated=evaluated,
+        cells=cells,
+    )
 
 
 @router.get("/backtests", response_model=list[BacktestSummaryOut])

@@ -43,6 +43,7 @@ export const api = {
     start_date: string
     end_date: string
     refresh?: boolean
+    cache_only?: boolean
     sma?: number[]
     ema?: number[]
     rsi_period?: number
@@ -53,6 +54,7 @@ export const api = {
       end_date: params.end_date,
     })
     if (params.refresh) q.set('refresh', 'true')
+    if (params.cache_only) q.set('cache_only', 'true')
     params.sma?.forEach((p) => q.append('sma', String(p)))
     params.ema?.forEach((p) => q.append('ema', String(p)))
     if (params.rsi_period) q.set('rsi_period', String(params.rsi_period))
@@ -91,8 +93,49 @@ export const api = {
     allocation_percent: number
     transaction_cost_percent: number
     slippage_percent: number
+    cache_only?: boolean
   }) =>
     request<BacktestResult>('/api/backtests', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  sensitivity: (body: {
+    symbol: string
+    start_date: string
+    end_date: string
+    strategy_type: 'sma_crossover' | 'ema_crossover'
+    fast_periods: number[]
+    slow_periods: number[]
+    initial_capital: number
+    allocation_percent: number
+    transaction_cost_percent: number
+    slippage_percent: number
+    cache_only?: boolean
+  }) =>
+    request<{
+      symbol: string
+      strategy_type: string
+      start_date: string
+      end_date: string
+      fast_periods: number[]
+      slow_periods: number[]
+      metric_note: string
+      disclaimer: string
+      cache_status: string | null
+      data_source: string | null
+      combinations_evaluated: number
+      cells: {
+        fast_period: number
+        slow_period: number
+        valid: boolean
+        total_return_percent: number | null
+        max_drawdown_percent: number | null
+        sharpe_ratio: number | null
+        completed_trades: number | null
+        final_equity: number | null
+        error: string | null
+      }[]
+    }>('/api/backtests/sensitivity', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

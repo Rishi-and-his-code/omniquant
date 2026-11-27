@@ -11,9 +11,13 @@ import {
   Select,
 } from '../components/ui/primitives'
 import { useApp } from '../context/AppContext'
-import { daysAgo, formatINR, formatNum, formatPct, isoDate } from '../lib/format'
+import { DEMO_CONFIG, pickDemoStrategyId } from '../lib/demoConfig'
+import { formatINR, formatNum, formatPct } from '../lib/format'
 import { api } from '../services/api'
 import type { AIReport, BacktestResult, Strategy } from '../types'
+
+type SensitivityResult = Awaited<ReturnType<typeof api.sensitivity>>
+type SensitivityMetric = 'total_return_percent' | 'max_drawdown_percent' | 'sharpe_ratio'
 
 export function BacktestLab() {
   const {
@@ -27,41 +31,62 @@ export function BacktestLab() {
   } = useApp()
 
   const [strategies, setStrategies] = useState<Strategy[]>([])
+  const [strategiesLoading, setStrategiesLoading] = useState(true)
   const [strategyId, setStrategyId] = useState<number | ''>('')
   const [versionId, setVersionId] = useState<number | ''>('')
-  const [start, setStart] = useState('2023-01-01')
-  const [end, setEnd] = useState(daysAgo(1))
-  const [capital, setCapital] = useState(100000)
-  const [allocation, setAllocation] = useState(100)
-  const [cost, setCost] = useState(0.1)
-  const [slippage, setSlippage] = useState(0.05)
+  const [start, setStart] = useState<string>(DEMO_CONFIG.startDate)
+  const [end, setEnd] = useState<string>(DEMO_CONFIG.endDate)
+  const [capital, setCapital] = useState<number>(DEMO_CONFIG.initialCapital)
+  const [allocation, setAllocation] = useState<number>(DEMO_CONFIG.allocationPercent)
+  const [cost, setCost] = useState<number>(DEMO_CONFIG.transactionCostPercent)
+  const [slippage, setSlippage] = useState<number>(DEMO_CONFIG.slippagePercent)
+  const [cacheOnly, setCacheOnly] = useState(true)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [report, setReport] = useState<AIReport | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [sensitivity, setSensitivity] = useState<SensitivityResult | null>(null)
+  const [sensitivityLoading, setSensitivityLoading] = useState(false)
+  const [sensitivityMetric, setSensitivityMetric] = useState<SensitivityMetric>('total_return_percent')
+  const [fastGrid, setFastGrid] = useState('10,20,30')
+  const [slowGrid, setSlowGrid] = useState('40,50,60')
 
   const selectedStrategy = strategies.find((s) => s.id === strategyId)
   const versions = selectedStrategy?.versions || []
 
   useEffect(() => {
-    void api.strategies().then((list) => {
-      setStrategies(list)
-      if (pendingStrategyVersionId) {
-        const owner = list.find((s) => s.versions.some((v) => v.id === pendingStrategyVersionId))
-        if (owner) {
-          setStrategyId(owner.id)
-          setVersionId(pendingStrategyVersionId)
-          return
+    setStrategiesLoading(true)
+    void api
+      .strategies()
+      .then((list) => {
+        setStrategies(list)
+        if (pendingStrategyVersionId) {
+          const owner = list.find((s) => s.versions.some((v) => v.id === pendingStrategyVersionId))
+          if (owner) {
+            setStrategyId(owner.id)
+            setVersionId(pendingStrategyVersionId)
+            return
+          }
         }
-      }
-      setStrategyId((current) => {
-        if (current !== '') return current
-        const first = list[0]
-        if (first) setVersionId(first.latest_version?.id ?? '')
-        return first?.id ?? ''
+        setStrategyId((current) => {
+          if (current !== '') return current
+          const demo = pickDemoStrategyId(
+            list,
+            DEMO_CONFIG.preferredStrategyNames,
+            DEMO_CONFIG.emaFast,
+            DEMO_CONFIG.emaSlow,
+          )
+          if (demo) {
+            setVersionId(demo.versionId)
+            return demo.strategyId
+          }
+          const first = list[0]
+          if (first) setVersionId(first.latest_version?.id ?? '')
+          return first?.id ?? ''
+        })
       })
-    })
+      .finally(() => setStrategiesLoading(false))
   }, [pendingStrategyVersionId])
 
   useEffect(() => {
@@ -94,6 +119,38 @@ export function BacktestLab() {
     [instruments],
   )
 
+  const loadDemoConfiguration = () => {
+    setSelectedSymbol(DEMO_CONFIG.symbol)
+    setStart(DEMO_CONFIG.startDate)
+    setEnd(DEMO_CONFIG.endDate)
+    setCapital(DEMO_CONFIG.initialCapital)
+    setAllocation(DEMO_CONFIG.allocationPercent)
+    setCost(DEMO_CONFIG.transactionCostPercent)
+    setSlippage(DEMO_CONFIG.slippagePercent)
+    setCacheOnly(true)
+    setError(null)
+    const demo = pickDemoStrategyId(
+      strategies,
+      DEMO_CONFIG.preferredStrategyNames,
+      DEMO_CONFIG.emaFast,
+      DEMO_CONFIG.emaSlow,
+    )
+    if (demo) {
+      setStrategyId(demo.strategyId)
+      setVersionId(demo.versionId)
+    } else {
+      setError(
+        'Demo EMA 20/50 strategy not found yet. Generate or save an EMA 20/50 strategy in Strategy Studio first.',
+      )
+    }
+  }
+
+  const parsePeriodList = (raw: string): number[] =>
+    raw
+      .split(/[, ]+/)
+      .map((x) => Number(x.trim()))
+      .filter((n) => Number.isInteger(n) && n >= 2 && n <= 250)
+
   const run = async () => {
     if (!versionId) {
       setError('Select a saved strategy version first.')
@@ -112,6 +169,7 @@ export function BacktestLab() {
         allocation_percent: allocation,
         transaction_cost_percent: cost,
         slippage_percent: slippage,
+        cache_only: cacheOnly,
       })
       setResult(res)
     } catch (e) {
@@ -120,6 +178,52 @@ export function BacktestLab() {
     } finally {
       setRunning(false)
     }
+  }
+
+  const runSensitivity = async () => {
+    const fast_periods = parsePeriodList(fastGrid)
+    const slow_periods = parsePeriodList(slowGrid)
+    if (!fast_periods.length || !slow_periods.length) {
+      setError('Enter valid fast/slow period lists (integers 2–250).')
+      return
+    }
+    setSensitivityLoading(true)
+    setError(null)
+    try {
+      const res = await api.sensitivity({
+        symbol: selectedSymbol,
+        start_date: start,
+        end_date: end,
+        strategy_type: 'ema_crossover',
+        fast_periods,
+        slow_periods,
+        initial_capital: capital,
+        allocation_percent: allocation,
+        transaction_cost_percent: cost,
+        slippage_percent: slippage,
+        cache_only: cacheOnly,
+      })
+      setSensitivity(res)
+    } catch (e) {
+      setSensitivity(null)
+      setError(e instanceof Error ? e.message : 'Sensitivity analysis failed')
+    } finally {
+      setSensitivityLoading(false)
+    }
+  }
+
+  const cellColor = (value: number | null | undefined, metric: SensitivityMetric) => {
+    if (value == null || Number.isNaN(value)) return 'bg-oq-elevated text-oq-muted'
+    if (metric === 'max_drawdown_percent') {
+      const intensity = Math.min(Math.abs(value) / 40, 1)
+      return intensity > 0.55 ? 'bg-red-900/50 text-oq-negative' : 'bg-red-950/30 text-oq-secondary'
+    }
+    if (value >= 0) {
+      const intensity = Math.min(value / 30, 1)
+      return intensity > 0.55 ? 'bg-emerald-900/50 text-oq-positive' : 'bg-emerald-950/30 text-oq-secondary'
+    }
+    const intensity = Math.min(Math.abs(value) / 30, 1)
+    return intensity > 0.55 ? 'bg-red-900/50 text-oq-negative' : 'bg-red-950/30 text-oq-secondary'
   }
 
   const analyze = async () => {
@@ -246,13 +350,27 @@ export function BacktestLab() {
           </div>
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Button onClick={() => void run()} disabled={running}>
+          <Button variant="secondary" onClick={loadDemoConfiguration} disabled={strategiesLoading}>
+            Load Demo Configuration
+          </Button>
+          <Button onClick={() => void run()} disabled={running || strategiesLoading}>
             {running ? 'Running simulation…' : 'Run Backtest'}
           </Button>
+          <label className="flex items-center gap-2 text-xs text-oq-secondary">
+            <input
+              type="checkbox"
+              checked={cacheOnly}
+              onChange={(e) => setCacheOnly(e.target.checked)}
+            />
+            Cache only
+          </label>
           <div className="text-xs text-oq-muted">
             Execution: next trading day open · Long only · Whole shares · Daily timeframe
           </div>
         </div>
+        {strategiesLoading && (
+          <p className="mt-2 text-xs text-oq-muted">Loading saved strategies…</p>
+        )}
       </Panel>
 
       {error && <Alert tone="error">{error}</Alert>}
@@ -466,11 +584,98 @@ export function BacktestLab() {
       {!result && !running && (
         <Panel>
           <p className="text-sm text-oq-secondary">
-            Configure a saved strategy version and run a backtest. Defaults: ₹100,000 capital, 0.10%
-            transaction cost, 0.05% slippage per side. End date preset: {isoDate(new Date())}.
+            Configure a saved strategy version and run a backtest. Demo defaults: RELIANCE.NS,
+            2023-01-01 → 2025-12-31, ₹100,000 capital, 0.10% transaction cost, 0.05% slippage,
+            cache-only market data.
           </p>
         </Panel>
       )}
+
+      <Panel title="Parameter sensitivity (in-sample)">
+        <p className="mb-3 text-xs text-oq-muted">
+          Reuses the current instrument, dates, capital, fees, and slippage with the existing
+          deterministic engine. Results are historical in-sample only — not proof of future
+          performance.
+        </p>
+        <div className="grid gap-3 md:grid-cols-4">
+          <div>
+            <Label>Fast periods</Label>
+            <Input value={fastGrid} onChange={(e) => setFastGrid(e.target.value)} />
+          </div>
+          <div>
+            <Label>Slow periods</Label>
+            <Input value={slowGrid} onChange={(e) => setSlowGrid(e.target.value)} />
+          </div>
+          <div>
+            <Label>Heatmap metric</Label>
+            <Select
+              value={sensitivityMetric}
+              onChange={(e) => setSensitivityMetric(e.target.value as SensitivityMetric)}
+            >
+              <option value="total_return_percent">Total return %</option>
+              <option value="max_drawdown_percent">Max drawdown %</option>
+              <option value="sharpe_ratio">Sharpe</option>
+            </Select>
+          </div>
+          <div className="flex items-end">
+            <Button onClick={() => void runSensitivity()} disabled={sensitivityLoading || running}>
+              {sensitivityLoading ? 'Running grid…' : 'Run sensitivity'}
+            </Button>
+          </div>
+        </div>
+        {sensitivity && (
+          <div className="mt-4 space-y-2">
+            <div className="text-xs text-oq-secondary">
+              {sensitivity.metric_note} · {sensitivity.combinations_evaluated} combinations ·{' '}
+              {sensitivity.cache_status || 'cache n/a'} · {sensitivity.data_source || 'source n/a'}
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full min-w-[28rem] text-center text-xs">
+                <thead>
+                  <tr>
+                    <th className="px-2 py-1 text-oq-muted">Fast \\ Slow</th>
+                    {sensitivity.slow_periods.map((s) => (
+                      <th key={s} className="px-2 py-1 text-oq-muted">
+                        {s}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sensitivity.fast_periods.map((f) => (
+                    <tr key={f}>
+                      <th className="px-2 py-1 text-oq-muted">{f}</th>
+                      {sensitivity.slow_periods.map((s) => {
+                        const cell = sensitivity.cells.find(
+                          (c) => c.fast_period === f && c.slow_period === s,
+                        )
+                        if (!cell?.valid) {
+                          return (
+                            <td key={`${f}-${s}`} className="border border-oq-border/50 px-2 py-2 text-oq-muted">
+                              —
+                            </td>
+                          )
+                        }
+                        const value = cell[sensitivityMetric]
+                        return (
+                          <td
+                            key={`${f}-${s}`}
+                            className={`border border-oq-border/50 px-2 py-2 font-mono-num ${cellColor(value, sensitivityMetric)}`}
+                            title={cell.error || undefined}
+                          >
+                            {value == null ? 'n/a' : formatNum(value)}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-oq-muted">{sensitivity.disclaimer}</p>
+          </div>
+        )}
+      </Panel>
     </div>
   )
 }
