@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+node_modules
+frontend/node_modules
+frontend/dist
+data/*.db
+data/cache/**
+!data/cache/.gitkeep
+**/__pycache__
+**/*.pyc
+.env
+*.tar
+.DS_Store
+OmniQuant_MVP_Prototype_Plan.pdf
+agent-transcripts
+.cursor
