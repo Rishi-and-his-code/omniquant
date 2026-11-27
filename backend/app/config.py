@@ -23,10 +23,15 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/omniquant.db"
 
     ai_enabled: bool = False
-    ai_base_url: str = "https://api.openai.com/v1"
+    # Primary provider is a local OmniRoute gateway.
+    ai_base_url: str = "http://127.0.0.1:20128/v1"
     ai_api_key: str = ""
     ai_model: str = ""
     ai_timeout_seconds: int = 45
+    # Direct OpenRouter call, used only when OmniRoute fails or times out.
+    ai_fallback_base_url: str = "https://openrouter.ai/api/v1"
+    ai_fallback_api_key: str = ""
+    ai_fallback_model: str = ""
 
     market_data_timeout_seconds: float = 30.0
     market_data_max_retries: int = 2
@@ -41,8 +46,21 @@ class Settings(BaseSettings):
         return self.data_dir / "artifacts"
 
     @property
+    def ai_primary_configured(self) -> bool:
+        return bool(self.ai_enabled and self.ai_base_url and self.ai_api_key and self.ai_model)
+
+    @property
+    def ai_fallback_configured(self) -> bool:
+        return bool(
+            self.ai_enabled
+            and self.ai_fallback_base_url
+            and self.ai_fallback_api_key
+            and self.ai_fallback_model
+        )
+
+    @property
     def ai_configured(self) -> bool:
-        return bool(self.ai_enabled and self.ai_api_key and self.ai_model)
+        return self.ai_primary_configured or self.ai_fallback_configured
 
 
 @lru_cache

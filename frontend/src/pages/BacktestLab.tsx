@@ -52,23 +52,33 @@ export function BacktestLab() {
         if (owner) {
           setStrategyId(owner.id)
           setVersionId(pendingStrategyVersionId)
+          return
         }
-      } else if (list[0]) {
-        setStrategyId(list[0].id)
-        setVersionId(list[0].latest_version?.id ?? '')
       }
+      setStrategyId((current) => {
+        if (current !== '') return current
+        const first = list[0]
+        if (first) setVersionId(first.latest_version?.id ?? '')
+        return first?.id ?? ''
+      })
     })
   }, [pendingStrategyVersionId])
 
   useEffect(() => {
     if (!pendingBacktestId) return
-    void api
-      .getBacktest(pendingBacktestId)
-      .then((r) => {
+    const id = pendingBacktestId
+    void (async () => {
+      try {
+        const r = await api.getBacktest(id)
         setResult(r)
+        const reports = await api.backtestReports(id)
+        setReport(reports[0] ?? null)
+      } catch {
+        setReport(null)
+      } finally {
         setPendingBacktestId(null)
-      })
-      .catch(() => setPendingBacktestId(null))
+      }
+    })()
   }, [pendingBacktestId, setPendingBacktestId])
 
   useEffect(() => {
@@ -417,7 +427,8 @@ export function BacktestLab() {
           >
             {!health?.ai_configured && (
               <Alert tone="warning">
-                AI is not configured. Calculated metrics above remain available without AI.
+                AI is not configured. Set the OmniRoute provider in `.env`, with OpenRouter as
+                timeout fallback. Calculated metrics above remain available without AI.
               </Alert>
             )}
             {report && (

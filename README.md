@@ -71,12 +71,15 @@ See `.env.example`.
 | Variable | Purpose |
 |----------|---------|
 | `AI_ENABLED` | `true` to allow AI routes |
-| `AI_BASE_URL` | OpenAI-compatible base URL |
-| `AI_API_KEY` | Server-side only — never commit |
-| `AI_MODEL` | Model id |
+| `AI_BASE_URL` | OmniRoute OpenAI-compatible URL. Default `http://127.0.0.1:20128/v1` |
+| `AI_API_KEY` | OmniRoute key. Server-side only — never commit |
+| `AI_MODEL` | Model id OmniRoute should serve |
+| `AI_FALLBACK_BASE_URL` | OpenRouter base URL, used only after OmniRoute fails or times out |
+| `AI_FALLBACK_API_KEY` | OpenRouter key. Server-side only — never commit |
+| `AI_FALLBACK_MODEL` | OpenRouter model id |
 | `DATA_DIR` | SQLite + cache directory |
 
-LM Studio on Mac host from Docker: `AI_BASE_URL=http://host.docker.internal:1234/v1`
+From Docker, OmniRoute on the host is `AI_BASE_URL=http://host.docker.internal:20128/v1`.
 
 ## Prepare evaluation cache
 

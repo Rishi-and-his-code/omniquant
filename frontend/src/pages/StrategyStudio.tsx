@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Alert, Button, Input, Label, Panel, Select } from '../components/ui/primitives'
 import { useApp } from '../context/AppContext'
@@ -50,7 +50,7 @@ function rulesFor(type: StratType, params: Record<string, number>) {
 
 export function StrategyStudio() {
   const navigate = useNavigate()
-  const { setPendingStrategyVersionId, health } = useApp()
+  const { setPendingStrategyVersionId, pendingStrategyVersionId, health } = useApp()
   const [mode, setMode] = useState<Mode>('manual')
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [name, setName] = useState('My Strategy')
@@ -63,6 +63,7 @@ export function StrategyStudio() {
   const [saving, setSaving] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [savedVersionId, setSavedVersionId] = useState<number | null>(null)
+  const consumedPendingId = useRef(false)
 
   const dsl = useMemo(() => buildDsl(name, type, params), [name, type, params])
   const rules = useMemo(() => rulesFor(type, params), [type, params])
@@ -70,8 +71,35 @@ export function StrategyStudio() {
   const reload = () => api.strategies().then(setStrategies).catch(() => setStrategies([]))
 
   useEffect(() => {
-    void reload()
-  }, [])
+    let cancelled = false
+    void api
+      .strategies()
+      .then((list) => {
+        if (cancelled || consumedPendingId.current) return
+        setStrategies(list)
+        if (pendingStrategyVersionId == null) return
+        consumedPendingId.current = true
+        const owner = list.find((s) =>
+          s.versions.some((v) => v.id === pendingStrategyVersionId),
+        )
+        const version = owner?.versions.find((v) => v.id === pendingStrategyVersionId)
+        if (owner && version) {
+          setEditingId(owner.id)
+          setName(version.dsl.name || owner.name)
+          setType(version.dsl.strategy_type)
+          setParams({ ...version.dsl.parameters })
+          setSavedVersionId(version.id)
+          setMode('manual')
+        }
+        setPendingStrategyVersionId(null)
+      })
+      .catch(() => {
+        if (!cancelled) setStrategies([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pendingStrategyVersionId, setPendingStrategyVersionId])
 
   const onTypeChange = (t: StratType) => {
     setType(t)
@@ -160,7 +188,8 @@ export function StrategyStudio() {
         <Panel title="Natural-language strategy generation">
           {!health?.ai_configured && (
             <Alert tone="warning">
-              AI is not configured. Set AI_ENABLED, AI_API_KEY, and AI_MODEL in `.env`. Manual
+              AI is not configured. Set AI_ENABLED plus the OmniRoute URL, key, and model in
+              `.env`. OpenRouter is used only if OmniRoute fails or times out. The manual
               builder remains fully functional.
             </Alert>
           )}

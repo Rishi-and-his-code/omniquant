@@ -183,6 +183,9 @@ export function ResearchHistory() {
                   [
                     ['Strengths', selectedReport.report.strengths],
                     ['Weaknesses', selectedReport.report.weaknesses],
+                    ['Risk observations', selectedReport.report.risk_observations],
+                    ['Suggested improvements', selectedReport.report.suggested_improvements],
+                    ['Recommended tests', selectedReport.report.recommended_tests],
                     ['Limitations', selectedReport.report.limitations],
                   ] as const
                 ).map(([title, items]) => (

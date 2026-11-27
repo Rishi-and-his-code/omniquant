@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 PRICE_ADJUSTMENT = "adjusted_close_basis"
 SOURCE = "yahoo_finance"
+# Calendar slack so a cache that ends on the last trading session still covers a
+# weekend or holiday request boundary. A multi-month gap still fails.
+CACHE_COVERAGE_SLACK = timedelta(days=7)
 
 
 class MarketDataError(Exception):
@@ -211,7 +214,7 @@ class MarketDataService:
 
         # Prefer a covering local cache before hitting the network (evaluation / offline)
         if not refresh:
-            cached = self._find_best_cache(symbol, start_date, effective_end)
+            cached = self._find_best_cache(symbol, fetch_start, effective_end)
             if cached is not None:
                 cached.warnings = list(cached.warnings) + [
                     "Serving validated local cache (network fetch skipped)."
@@ -260,7 +263,7 @@ class MarketDataService:
             )
         except MarketDataError:
             if allow_cache_fallback:
-                fallback = self._find_best_cache(symbol, start_date, effective_end)
+                fallback = self._find_best_cache(symbol, fetch_start, effective_end)
                 if fallback is not None:
                     fallback.warnings.append(
                         "Provider fetch failed; serving matching local cache."
@@ -271,7 +274,7 @@ class MarketDataService:
         except Exception as exc:
             logger.exception("Market data fetch failed for %s", symbol)
             if allow_cache_fallback:
-                fallback = self._find_best_cache(symbol, start_date, effective_end)
+                fallback = self._find_best_cache(symbol, fetch_start, effective_end)
                 if fallback is not None:
                     fallback.warnings.append(
                         f"Provider error ({type(exc).__name__}); serving matching local cache."
@@ -293,38 +296,38 @@ class MarketDataService:
             df = self._fetch_yahoo_chart(symbol, start, end_exclusive)
             if df is not None and not df.empty:
                 return df, "yahoo_chart_api"
+        except MarketDataError as exc:
+            last_err = exc
+            logger.warning("Yahoo chart API failed for %s: %s", symbol, exc)
+            # yfinance reads the same Yahoo hosts. After a 429 it cannot succeed
+            # and another burst makes the limit last longer.
+            if isinstance(exc.details, dict) and exc.details.get("status") == 429:
+                raise
         except Exception as exc:
             last_err = exc
             logger.warning("Yahoo chart API failed for %s: %s", symbol, exc)
 
-        for attempt in range(self.settings.market_data_max_retries + 1):
-            try:
-                ticker = yf.Ticker(symbol)
-                df = ticker.history(
-                    start=start.isoformat(),
-                    end=end_exclusive.isoformat(),
-                    interval="1d",
-                    auto_adjust=True,
-                    actions=False,
-                    timeout=self.settings.market_data_timeout_seconds,
-                )
-                if df is not None and not df.empty:
-                    return df, "yfinance"
-                last_err = MarketDataError(
-                    "MARKET_DATA_EMPTY",
-                    f"No historical data returned for {symbol}.",
-                )
-            except MarketDataError:
-                raise
-            except Exception as exc:
-                last_err = exc
-                logger.warning(
-                    "yfinance attempt %s failed for %s: %s",
-                    attempt + 1,
-                    symbol,
-                    exc,
-                )
-                time.sleep(0.5 * (attempt + 1))
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(
+                start=start.isoformat(),
+                end=end_exclusive.isoformat(),
+                interval="1d",
+                auto_adjust=True,
+                actions=False,
+                timeout=self.settings.market_data_timeout_seconds,
+            )
+            if df is not None and not df.empty:
+                return df, "yfinance"
+            last_err = MarketDataError(
+                "MARKET_DATA_EMPTY",
+                f"No historical data returned for {symbol}.",
+            )
+        except MarketDataError:
+            raise
+        except Exception as exc:
+            last_err = exc
+            logger.warning("yfinance failed for %s: %s", symbol, exc)
         if isinstance(last_err, MarketDataError):
             raise last_err
         raise MarketDataError(
@@ -336,11 +339,33 @@ class MarketDataService:
     def _fetch_yahoo_chart(
         self, symbol: str, start: date, end_exclusive: date
     ) -> pd.DataFrame:
-        """Direct Yahoo Finance chart API with browser User-Agent.
+        """Chart API in short windows. A long range is rejected with HTTP 429.
 
-        Uses adjclose when present so prices remain on an adjusted basis
-        consistent with the research approximation documented in the UI.
+        Each window is requested once. A 429 stops the symbol instead of retrying.
         """
+        frames: list[pd.DataFrame] = []
+        cursor = start
+        while cursor < end_exclusive:
+            window_end = min(cursor + timedelta(days=120), end_exclusive)
+            if frames:
+                time.sleep(1.25)
+            frame = self._fetch_yahoo_chart_window(symbol, cursor, window_end)
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+            cursor = window_end
+        if not frames:
+            raise MarketDataError(
+                "MARKET_DATA_EMPTY",
+                f"No historical data returned for {symbol}.",
+            )
+        df = pd.concat(frames)
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+        return df
+
+    def _fetch_yahoo_chart_window(
+        self, symbol: str, start: date, end_exclusive: date
+    ) -> pd.DataFrame:
+        """One Yahoo chart request. Uses adjusted close when Yahoo provides it."""
         period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
         period2 = int(
             datetime.combine(end_exclusive, datetime.min.time(), tzinfo=timezone.utc).timestamp()
@@ -356,34 +381,24 @@ class MarketDataService:
             ),
             "Accept": "application/json",
         }
-        # urllib is more reliable against Yahoo rate-limits than some HTTP clients here
-        payload = None
-        last_http_err: Exception | None = None
-        for attempt in range(self.settings.market_data_max_retries + 2):
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(
-                    req, timeout=self.settings.market_data_timeout_seconds
-                ) as resp:
-                    raw = resp.read().decode("utf-8")
-                    payload = json.loads(raw)
-                    break
-            except urllib.error.HTTPError as exc:
-                last_http_err = exc
-                wait = 3.0 * (attempt + 1) if exc.code == 429 else 1.0 * (attempt + 1)
-                logger.warning(
-                    "Yahoo HTTP %s for %s (attempt %s)", exc.code, symbol, attempt + 1
-                )
-                time.sleep(wait)
-            except Exception as exc:
-                last_http_err = exc
-                time.sleep(1.0 * (attempt + 1))
-        if payload is None:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(
+                req, timeout=self.settings.market_data_timeout_seconds
+            ) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
             raise MarketDataError(
                 "MARKET_DATA_UNAVAILABLE",
                 f"Historical market data could not be retrieved for {symbol}.",
-                details={"reason": str(last_http_err)},
-            )
+                details={"status": exc.code},
+            ) from exc
+        except Exception as exc:
+            raise MarketDataError(
+                "MARKET_DATA_UNAVAILABLE",
+                f"Historical market data could not be retrieved for {symbol}.",
+                details={"reason": str(exc)},
+            ) from exc
 
         result = (payload.get("chart") or {}).get("result")
         if not result:
@@ -415,7 +430,6 @@ class MarketDataService:
             )
             if None in (o, h, l, c):
                 continue
-            # Prefer adjusted close scaling when adjclose is available
             adj_c = adj[i] if adj and i < len(adj) and adj[i] is not None else None
             if adj_c is not None and c not in (0, None):
                 factor = adj_c / c
@@ -432,10 +446,7 @@ class MarketDataService:
                 }
             )
         if not rows:
-            raise MarketDataError(
-                "MARKET_DATA_EMPTY",
-                f"No historical data returned for {symbol}.",
-            )
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
         return pd.DataFrame(rows).set_index("Date")
 
     def _write_cache(
@@ -479,7 +490,7 @@ class MarketDataService:
         self, symbol: str, start: date, end: date
     ) -> MarketDataResult | None:
         best: MarketDataResult | None = None
-        best_overlap = -1
+        best_span: int | None = None
         for meta_path in self.cache_dir.glob("*.meta.json"):
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -487,8 +498,6 @@ class MarketDataService:
                     continue
                 if meta.get("price_adjustment") != PRICE_ADJUSTMENT:
                     continue
-                csv_path = meta_path.with_suffix("").with_suffix(".csv")
-                # meta is *.meta.json → stem handling
                 csv_path = Path(str(meta_path).replace(".meta.json", ".csv"))
                 if not csv_path.exists():
                     continue
@@ -497,11 +506,13 @@ class MarketDataService:
                 avail_e = date.fromisoformat(result.available_end) if result.available_end else None
                 if not avail_s or not avail_e:
                     continue
-                overlap_start = max(start, avail_s)
-                overlap_end = min(end, avail_e)
-                overlap = (overlap_end - overlap_start).days
-                if overlap > best_overlap and overlap > 30:
-                    best_overlap = overlap
+                if avail_s > start + CACHE_COVERAGE_SLACK:
+                    continue
+                if avail_e < end - CACHE_COVERAGE_SLACK:
+                    continue
+                span = (avail_e - avail_s).days
+                if best_span is None or span < best_span:
+                    best_span = span
                     best = result
             except Exception:
                 continue

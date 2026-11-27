@@ -17,7 +17,8 @@ def ai_status() -> dict:
     return {
         "ai_enabled": settings.ai_enabled,
         "ai_configured": settings.ai_configured,
-        "model": settings.ai_model or None,
+        "ai_fallback_configured": settings.ai_fallback_configured,
+        "model": settings.ai_model or settings.ai_fallback_model or None,
     }
 
 

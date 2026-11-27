@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from app.config import Settings, get_settings
 from app.schemas.strategy import parse_strategy_dsl, strategy_rules_text
@@ -63,6 +63,21 @@ class AIProviderError(Exception):
         self.details = details
 
 
+class _TransportFailure(Exception):
+    """The provider did not return a completion. The other provider may be tried."""
+
+
+_FAILOVER_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+class _AITarget:
+    def __init__(self, role: str, base_url: str, api_key: str, model: str):
+        self.role = role
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model = model
+
+
 class AIModelProvider:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -71,47 +86,87 @@ class AIModelProvider:
         return {
             "ai_enabled": self.settings.ai_enabled,
             "ai_configured": self.settings.ai_configured,
-            "model": self.settings.ai_model or None,
+            "ai_fallback_configured": self.settings.ai_fallback_configured,
+            "model": self.settings.ai_model or self.settings.ai_fallback_model or None,
             "base_url_set": bool(self.settings.ai_base_url),
-            # Never return the API key
         }
 
-    def _client(self) -> OpenAI:
-        if not self.settings.ai_configured:
+    def _targets(self) -> list[_AITarget]:
+        targets: list[_AITarget] = []
+        if self.settings.ai_primary_configured:
+            targets.append(
+                _AITarget(
+                    "primary",
+                    self.settings.ai_base_url,
+                    self.settings.ai_api_key,
+                    self.settings.ai_model,
+                )
+            )
+        if self.settings.ai_fallback_configured:
+            targets.append(
+                _AITarget(
+                    "fallback",
+                    self.settings.ai_fallback_base_url,
+                    self.settings.ai_fallback_api_key,
+                    self.settings.ai_fallback_model,
+                )
+            )
+        return targets
+
+    def _complete(self, target: _AITarget, system: str, user: str) -> str:
+        client = OpenAI(
+            api_key=target.api_key,
+            base_url=target.base_url,
+            timeout=self.settings.ai_timeout_seconds,
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=target.model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                response_format={"type": "json_object"},
+            )
+        except (APITimeoutError, APIConnectionError, TimeoutError, ConnectionError) as exc:
+            raise _TransportFailure(str(exc)) from exc
+        except APIStatusError as exc:
+            if exc.status_code in _FAILOVER_STATUS:
+                raise _TransportFailure(str(exc)) from exc
+            raise AIProviderError(
+                "AI_PROVIDER_ERROR",
+                "AI provider rejected the request.",
+                details={"provider": target.role, "status": exc.status_code},
+            ) from exc
+        return resp.choices[0].message.content or ""
+
+    def _chat_json(self, system: str, user: str) -> tuple[dict[str, Any], str]:
+        targets = self._targets()
+        if not targets:
             raise AIProviderError(
                 "AI_UNAVAILABLE",
                 "AI is disabled or credentials/model are not configured.",
             )
-        return OpenAI(
-            api_key=self.settings.ai_api_key,
-            base_url=self.settings.ai_base_url,
-            timeout=self.settings.ai_timeout_seconds,
-        )
-
-    def _chat_json(self, system: str, user: str) -> tuple[dict[str, Any], str]:
-        client = self._client()
-        last_err: Exception | None = None
-        for attempt in range(2):
+        last_transport: _TransportFailure | None = None
+        for target in targets:
             try:
-                resp = client.chat.completions.create(
-                    model=self.settings.ai_model,
-                    temperature=0.2,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    response_format={"type": "json_object"},
-                )
-                content = resp.choices[0].message.content or ""
-                data = self._parse_json(content)
-                return data, self.settings.ai_model
-            except Exception as exc:
-                last_err = exc
-                logger.warning("AI request attempt %s failed: %s", attempt + 1, exc)
+                content = self._complete(target, system, user)
+                return self._parse_json(content), target.model
+            except _TransportFailure as exc:
+                last_transport = exc
+                logger.warning("AI %s provider failed: %s", target.role, exc)
+                continue
+            except json.JSONDecodeError as exc:
+                raise AIProviderError(
+                    "AI_INVALID_OUTPUT",
+                    "AI returned malformed JSON.",
+                    details={"provider": target.role},
+                ) from exc
         raise AIProviderError(
             "AI_PROVIDER_ERROR",
             "AI provider request failed.",
-            details={"reason": str(last_err)},
+            details={"reason": str(last_transport)},
         )
 
     def _parse_json(self, content: str) -> dict[str, Any]:

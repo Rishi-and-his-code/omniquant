@@ -69,6 +69,7 @@ TEMPLATES = [
 
 
 def main() -> int:
+    refresh = "--refresh" in sys.argv
     settings = get_settings()
     print(f"Data dir: {settings.data_dir.resolve()}")
     init_db()
@@ -79,7 +80,7 @@ def main() -> int:
     for symbol in DEMO_SYMBOLS:
         print(f"\nFetching {symbol} {START} → {END} (+warmup)...")
         try:
-            result = svc.get_history(symbol, START, END, refresh=True, warmup_days=80)
+            result = svc.get_history(symbol, START, END, refresh=refresh, warmup_days=80)
             print(
                 f"  OK  rows={len(result.df)} cache={result.cache_status} "
                 f"range={result.available_start}→{result.available_end}"
