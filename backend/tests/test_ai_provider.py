@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,7 +36,7 @@ def _settings() -> Settings:
 def _install(monkeypatch: pytest.MonkeyPatch, responder) -> list[str]:
     calls: list[str] = []
 
-    def fake(self, target, system, user):
+    def fake(self, target, system, user, **kwargs):
         calls.append(target.role)
         return responder(target)
 
@@ -60,7 +61,7 @@ def test_primary_success_does_not_call_openrouter(monkeypatch: pytest.MonkeyPatc
 def test_timeout_uses_openrouter_once(monkeypatch: pytest.MonkeyPatch) -> None:
     def responder(target):
         if target.role == "primary":
-            raise _TransportFailure("timed out")
+            raise _TransportFailure("timed out", category="timeout")
         return json.dumps({"status": "ok", "dsl": EMA, "message": None})
 
     calls = _install(monkeypatch, responder)
@@ -96,14 +97,14 @@ def test_malformed_json_does_not_fall_back(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_both_providers_down(monkeypatch: pytest.MonkeyPatch) -> None:
     def responder(target):
-        raise _TransportFailure("down")
+        raise _TransportFailure("down", category="unreachable")
 
     calls = _install(monkeypatch, responder)
 
     with pytest.raises(AIProviderError) as exc:
         AIModelProvider(_settings()).generate_strategy("Create an EMA crossover")
 
-    assert exc.value.code == "AI_PROVIDER_ERROR"
+    assert exc.value.code == "AI_UNREACHABLE"
     assert calls == ["primary", "fallback"]
 
 
@@ -126,3 +127,69 @@ def test_configuration_report_hides_keys() -> None:
     assert "fallback-secret" not in blob
     assert report["ai_configured"] is True
     assert report["ai_fallback_configured"] is True
+
+
+def test_auth_failure_does_not_call_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    def responder(target):
+        raise AIProviderError(
+            "AI_AUTH_FAILED",
+            "AI provider authentication failed. Check the configured API key.",
+            details={"provider": target.role, "status": 401},
+        )
+
+    calls = _install(monkeypatch, responder)
+    with pytest.raises(AIProviderError) as exc:
+        AIModelProvider(_settings()).generate_strategy("Create an EMA crossover")
+    assert exc.value.code == "AI_AUTH_FAILED"
+    assert calls == ["primary"]
+
+
+def test_response_format_rejection_retries_without_json_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+    from openai import APIStatusError
+
+    calls: list[bool] = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            use_fmt = "response_format" in kwargs
+            calls.append(use_fmt)
+            if use_fmt:
+                response = httpx.Response(
+                    400,
+                    request=httpx.Request("POST", "http://example.test/v1/chat/completions"),
+                    json={
+                        "error": {
+                            "message": "response_format.json_object is not supported",
+                        }
+                    },
+                )
+                raise APIStatusError(message="bad request", response=response, body=None)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps({"status": "ok", "dsl": EMA, "message": None})
+                        )
+                    )
+                ]
+            )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("app.services.ai_provider.OpenAI", FakeClient)
+    settings = _settings()
+    settings.ai_fallback_api_key = ""
+    settings.ai_fallback_model = ""
+    result = AIModelProvider(settings).generate_strategy("Create an EMA crossover 20 and 50")
+    assert calls == [True, False]
+    assert result["status"] == "ok"
+    assert result["dsl"]["parameters"]["fast_period"] == 20
+
+
+def test_parse_json_extracts_object_from_prose() -> None:
+    provider = AIModelProvider(_settings())
+    data = provider._parse_json('Here you go:\n{"status":"unsupported","dsl":null,"message":"nope"}\nThanks')
+    assert data["status"] == "unsupported"

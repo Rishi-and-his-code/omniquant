@@ -401,8 +401,14 @@ def analyze_backtest(backtest_id: int, db: Session = Depends(get_db)) -> AIRepor
     try:
         report, model, prompt = provider.generate_analysis(context)
     except AIProviderError as exc:
+        status = (
+            503
+            if exc.code
+            in {"AI_UNAVAILABLE", "AI_UNREACHABLE", "AI_TIMEOUT", "AI_RATE_LIMITED"}
+            else 502
+        )
         raise HTTPException(
-            status_code=503,
+            status_code=status,
             detail={"code": exc.code, "message": exc.message, "details": exc.details},
         ) from exc
 

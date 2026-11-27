@@ -22,6 +22,12 @@ def ai_status() -> dict:
     }
 
 
+def _http_status_for_ai(code: str) -> int:
+    if code in {"AI_UNAVAILABLE", "AI_UNREACHABLE", "AI_TIMEOUT", "AI_RATE_LIMITED"}:
+        return 503
+    return 502
+
+
 @router.post("/generate-strategy", response_model=AIGenerateStrategyResponse)
 def generate_strategy(body: AIGenerateStrategyRequest) -> AIGenerateStrategyResponse:
     provider = AIModelProvider()
@@ -29,12 +35,7 @@ def generate_strategy(body: AIGenerateStrategyRequest) -> AIGenerateStrategyResp
         result = provider.generate_strategy(body.prompt)
         return AIGenerateStrategyResponse(**result)
     except AIProviderError as exc:
-        if exc.code == "AI_UNAVAILABLE":
-            raise HTTPException(
-                status_code=503,
-                detail={"code": exc.code, "message": exc.message, "details": exc.details},
-            ) from exc
         raise HTTPException(
-            status_code=502,
+            status_code=_http_status_for_ai(exc.code),
             detail={"code": exc.code, "message": exc.message, "details": exc.details},
         ) from exc

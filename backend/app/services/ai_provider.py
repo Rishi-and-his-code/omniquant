@@ -42,6 +42,9 @@ You MUST NOT invent, alter, or recalculate numeric metrics.
 You MUST NOT give real-money trading advice or guarantee future performance.
 Frame the output as AI-assisted historical research only.
 
+When comparing strategy total return to buy-and-hold / benchmark return, state the comparison accurately
+using only the provided metric values. If the strategy underperformed the benchmark, say so clearly.
+
 Return JSON ONLY with this shape:
 {
   "summary": "string",
@@ -66,6 +69,11 @@ class AIProviderError(Exception):
 class _TransportFailure(Exception):
     """The provider did not return a completion. The other provider may be tried."""
 
+    def __init__(self, message: str, *, category: str = "transport", status: int | None = None):
+        super().__init__(message)
+        self.category = category
+        self.status = status
+
 
 _FAILOVER_STATUS = {408, 429, 500, 502, 503, 504}
 
@@ -76,6 +84,105 @@ class _AITarget:
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+
+
+def _sanitize_provider_text(text: str, *, max_len: int = 280) -> str:
+    """Strip secrets-like tokens and truncate for logs / safe details."""
+    cleaned = re.sub(r"(?i)(bearer\s+)[^\s,]+", r"\1***", text or "")
+    cleaned = re.sub(
+        r"(?i)(api[_-]?key|authorization|token)\s*[:=]\s*[^\s,;]+",
+        r"\1=***",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > max_len:
+        return cleaned[: max_len - 1] + "…"
+    return cleaned
+
+
+def _provider_error_body(exc: APIStatusError) -> str:
+    try:
+        body = exc.response.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or err.get("code") or body)
+        if err:
+            return str(err)
+        return str(body)
+    try:
+        return exc.response.text or str(exc)
+    except Exception:
+        return str(exc)
+
+
+def _classify_status_error(target: _AITarget, exc: APIStatusError) -> AIProviderError | _TransportFailure:
+    status = exc.status_code
+    raw = _sanitize_provider_text(_provider_error_body(exc))
+    lower = raw.lower()
+    details = {
+        "provider": target.role,
+        "status": status,
+        "model": target.model,
+        "provider_message": raw or None,
+    }
+
+    if status in _FAILOVER_STATUS:
+        category = "rate_limit" if status == 429 else "provider_unavailable"
+        return _TransportFailure(raw or f"HTTP {status}", category=category, status=status)
+
+    if status in {401, 403}:
+        return AIProviderError(
+            "AI_AUTH_FAILED",
+            "AI provider authentication failed. Check the configured API key.",
+            details=details,
+        )
+    if status == 404:
+        return AIProviderError(
+            "AI_MODEL_UNAVAILABLE",
+            "AI model or endpoint was not found. Check AI_BASE_URL and AI_MODEL.",
+            details=details,
+        )
+    if status == 400:
+        if "response_format" in lower or "json_object" in lower or "json schema" in lower:
+            return AIProviderError(
+                "AI_UNSUPPORTED_REQUEST",
+                "AI provider rejected structured JSON request parameters.",
+                details=details,
+            )
+        if "decisions model" in lower or "/api/alpha/decisions" in lower:
+            return AIProviderError(
+                "AI_MODEL_UNAVAILABLE",
+                "Configured AI model does not support chat completions. Use a chat-compatible model id.",
+                details=details,
+            )
+        if "model" in lower and any(
+            token in lower for token in ("not found", "invalid", "does not exist", "unknown", "cannot be used")
+        ):
+            return AIProviderError(
+                "AI_MODEL_UNAVAILABLE",
+                "Configured AI model is unavailable or incompatible with chat completions.",
+                details=details,
+            )
+        return AIProviderError(
+            "AI_UNSUPPORTED_REQUEST",
+            "AI provider rejected the request format or parameters.",
+            details=details,
+        )
+    if status == 422:
+        return AIProviderError(
+            "AI_UNSUPPORTED_REQUEST",
+            "AI provider rejected the request schema.",
+            details=details,
+        )
+
+    return AIProviderError(
+        "AI_PROVIDER_ERROR",
+        "AI provider returned an unexpected error.",
+        details=details,
+    )
 
 
 class AIModelProvider:
@@ -113,32 +220,55 @@ class AIModelProvider:
             )
         return targets
 
-    def _complete(self, target: _AITarget, system: str, user: str) -> str:
+    def _complete(
+        self,
+        target: _AITarget,
+        system: str,
+        user: str,
+        *,
+        use_json_format: bool = True,
+    ) -> str:
         client = OpenAI(
             api_key=target.api_key,
             base_url=target.base_url,
             timeout=self.settings.ai_timeout_seconds,
         )
+        kwargs: dict[str, Any] = {
+            "model": target.model,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if use_json_format:
+            kwargs["response_format"] = {"type": "json_object"}
+
         try:
-            resp = client.chat.completions.create(
-                model=target.model,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                response_format={"type": "json_object"},
-            )
-        except (APITimeoutError, APIConnectionError, TimeoutError, ConnectionError) as exc:
-            raise _TransportFailure(str(exc)) from exc
+            resp = client.chat.completions.create(**kwargs)
+        except (APITimeoutError, TimeoutError) as exc:
+            raise _TransportFailure(str(exc), category="timeout") from exc
+        except (APIConnectionError, ConnectionError) as exc:
+            raise _TransportFailure(str(exc), category="unreachable") from exc
         except APIStatusError as exc:
-            if exc.status_code in _FAILOVER_STATUS:
-                raise _TransportFailure(str(exc)) from exc
-            raise AIProviderError(
-                "AI_PROVIDER_ERROR",
-                "AI provider rejected the request.",
-                details={"provider": target.role, "status": exc.status_code},
-            ) from exc
+            classified = _classify_status_error(target, exc)
+            if (
+                use_json_format
+                and isinstance(classified, AIProviderError)
+                and classified.code == "AI_UNSUPPORTED_REQUEST"
+                and exc.status_code == 400
+            ):
+                raw = str((classified.details or {}).get("provider_message") or "").lower()
+                if "response_format" in raw or "json_object" in raw or "json schema" in raw:
+                    logger.warning(
+                        "AI %s rejected response_format; retrying without structured JSON mode",
+                        target.role,
+                    )
+                    return self._complete(target, system, user, use_json_format=False)
+            if isinstance(classified, _TransportFailure):
+                raise classified from exc
+            raise classified from exc
+
         return resp.choices[0].message.content or ""
 
     def _chat_json(self, system: str, user: str) -> tuple[dict[str, Any], str]:
@@ -149,24 +279,61 @@ class AIModelProvider:
                 "AI is disabled or credentials/model are not configured.",
             )
         last_transport: _TransportFailure | None = None
+        last_reject: AIProviderError | None = None
         for target in targets:
             try:
                 content = self._complete(target, system, user)
                 return self._parse_json(content), target.model
             except _TransportFailure as exc:
                 last_transport = exc
-                logger.warning("AI %s provider failed: %s", target.role, exc)
+                logger.warning(
+                    "AI %s provider transport failure (%s): %s",
+                    target.role,
+                    exc.category,
+                    _sanitize_provider_text(str(exc)),
+                )
                 continue
+            except AIProviderError as exc:
+                # Non-transport rejection: do not hide behind another provider silently
+                # unless primary is unreachable-style only. Auth/model/format errors stop here.
+                last_reject = exc
+                logger.warning(
+                    "AI %s provider rejected request code=%s status=%s",
+                    target.role,
+                    exc.code,
+                    (exc.details or {}).get("status") if isinstance(exc.details, dict) else None,
+                )
+                raise
             except json.JSONDecodeError as exc:
                 raise AIProviderError(
                     "AI_INVALID_OUTPUT",
                     "AI returned malformed JSON.",
                     details={"provider": target.role},
                 ) from exc
+
+        if last_reject is not None:
+            raise last_reject
+        category = last_transport.category if last_transport else "transport"
+        if category == "timeout":
+            message = "AI provider timed out."
+            code = "AI_TIMEOUT"
+        elif category == "unreachable":
+            message = "AI provider is unreachable from the application."
+            code = "AI_UNREACHABLE"
+        elif category == "rate_limit":
+            message = "AI provider rate limit exceeded. Try again shortly."
+            code = "AI_RATE_LIMITED"
+        else:
+            message = "AI provider request failed."
+            code = "AI_PROVIDER_ERROR"
         raise AIProviderError(
-            "AI_PROVIDER_ERROR",
-            "AI provider request failed.",
-            details={"reason": str(last_transport)},
+            code,
+            message,
+            details={
+                "reason": _sanitize_provider_text(str(last_transport) if last_transport else ""),
+                "category": category,
+                "status": last_transport.status if last_transport else None,
+            },
         )
 
     def _parse_json(self, content: str) -> dict[str, Any]:
@@ -174,6 +341,12 @@ class AIModelProvider:
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
+        # Recover leading/trailing prose around a JSON object when providers ignore JSON mode.
+        if not text.startswith("{"):
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start : end + 1]
         return json.loads(text)
 
     def generate_strategy(self, prompt: str) -> dict[str, Any]:
